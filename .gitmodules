@@ -1,3 +1,0 @@
-[submodule "externals/functools"]
-	path = externals/functools
-	url = git://github.com/ShiftSpace/functools.git
