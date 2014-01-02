@@ -294,7 +294,7 @@ var Promise = new Class({
     } else if(!this.__realized && notify !== false) {
       this.__realized = true;
       this.__value = this.applyOps(value);
-      this.fireEvent('realized', this.__value);
+      this.fireEvent('realized', [this.__value, this]);
     } else {
       this.__value = value;
     }
