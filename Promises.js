@@ -6,7 +6,34 @@
 */
 
 Function.implement({
-  future: function() { return this.decorate(promise); }
+  future: function(onError) { return promise(this, onError); },
+
+  /**
+   * Creates a promise for a function with onSuccess and onFailure handlers.
+   * You can pass any arguments you would normally pass to the original function.
+   *
+   * @type Promise
+   */
+  promised: function () {
+    var promise = this.future();
+
+    var args    = Array.clone(arguments).append([
+      function () { // onSuccess
+        promise.deliver(Array.from(arguments));
+      },
+      function (errorMessage) { // onFailure
+        var e = new Error(errorMessage);
+        e.parameters = Array.from(arguments);
+        promise.deliver(e);
+      }
+    ]);
+
+    return promise.apply(this, args);
+  },
+
+  callWithArgs: function (parameters) {
+    return this.apply(this, parameters);
+  }
 });
 
 /*
@@ -120,29 +147,29 @@ var Promise = new Class({
 
   /*
     Function: initReq
-      *private*
-      Initialize the request. If successfull calls deliver with the value
-      received from the server after applying all operations on the value
-      first. On request failure, delivers to undefined and fires an error
-      event passing itself as data.
+    *private*
+    Initialize the request. If successfull calls deliver with the value
+    received from the server after applying all operations on the value
+    first. On request failure, delivers to undefined and fires an error
+    event passing itself as data.
 
     Parameters:
-      req - MooTools Request object.
+    req - MooTools Request object.
   */
   initReq: function(req) {
     this.__req = req;
 
-    var successHandler = function(r) {
+    var successHandler = function (r) {
       var json = (typeOf(r) == 'object') ? r : ((!req.options.bare) ? JSON.decode(r) : r),
-          v;
-      if(Promise.deref !== null && req.options.bare !== true && !json.error) {
+        v;
+      if ( Promise.deref !== null && req.options.bare !== true && !json.error ) {
         var temp = $get.apply(null, [json].concat(Promise.deref.split(".")));
-        if(temp !== null && temp !== undefined) {
+        if( temp !== null && temp !== undefined )
           v = temp;
-        }
       } else {
         v = json;
       }
+
       this.deliver(this.applyOps(v));
     }.bind(this);
 
@@ -370,6 +397,41 @@ var Promise = new Class({
   fn: function(fn) {
     if(!this.isRealized()) return (new Promise(this, {lazy:this.options.lazy})).op(fn);
     return fn(this.value());
+  },
+
+  /**
+   * Wrapper to chain / concatenate asynchronous calls.
+   *
+   * <code>
+   *     new Promise(new Request({
+   *         'url': 'http://example.com',
+   *         'bare': true
+   *     })).then(function (xhr) {
+   *         // This may itself return a promise for chaining.
+   *     }).then(function () {
+   *         // ...
+   *     });
+   * </code>
+   *
+   * @param Function callback
+   * @returns Returns a promise.
+   * @type Promise
+   */
+  then: function (callback, onError) {
+    var args = Array.clone(arguments);
+
+    // Replace "callback" parameter with the promise
+    args[0] = this;
+
+    var result = callback.future(onError).callWithArgs(args);
+    if ( result instanceof Promise )
+      return result;
+
+    // Call "Promise.deliver()" explicitly instead of passing the result
+    // to the constructor to support undefined results.
+    var p = new Promise();
+    p.deliver(result);
+    return p;
   }
 });
 
@@ -482,7 +544,7 @@ Promise.watch = function(args, cb, errCb) {
 
     if(errCb) {
       unrealized.each(function(aPromise) {
-        aPromise.addEvent('error', errCb.bind(null, [aPromise]));
+        aPromise.addEvent('error', errCb.bind(null, aPromise));
       });
     }
 
@@ -506,6 +568,14 @@ Promise.watch = function(args, cb, errCb) {
 */
 Promise.allRealized = function(vs) { return vs.filter(Promise.isPromise).every(Function.msg("isRealized")); };
 
+Promise.errorHandler = function(errPromise) {
+  var err = new Error('Failed to realize promise' + (errPromise.__req == null ? '' : ' (URL: ' + errPromise.__req.options.url + ')'));
+  err.promise = errPromise;
+  err.source = fn.toString();
+  err.sourceArgs = args;
+  throw err;
+};
+
 /*
   Decorator: promise
     The promise decorator. Takes a function and returns a new function that
@@ -519,11 +589,22 @@ Promise.allRealized = function(vs) { return vs.filter(Promise.isPromise).every(F
   Returns:
     A function decorate to handle promises in it's arguments.
 */
-function promise(fn) {
+function promise(fn, onError) {
   return function decorator() {
     var args = Array.from(arguments);
     var promises = args.filter(Promise.isPromise);
     var unrealized = promises.filter(Function.msg('isNotRealized'));
+
+    switch (typeOf(onError)) {
+      case 'function':
+        onError.bind(this);
+        break;
+      case 'boolean':
+        if (onError === false)
+          break;
+      default:
+        onError = Promise.errorHandler.bind(this);
+    }
 
     if(unrealized.length > 0) {
       if(!Promise.debug) {
@@ -537,13 +618,9 @@ function promise(fn) {
             p.deliver(fn.apply(this, values));
             this._current = temp;
           }.bind(this),
-          function(errPromise) {
-            var err = new Error("Failed to realize promise from " + errPromise.__req.options.url);
-            err.promise = errPromise;
-            err.source = fn.toString();
-            err.sourceArgs = args;
-            throw err;
-          }.bind(this));
+          onError
+        );
+
         return p;
       } else {
         var temp = this._current;
